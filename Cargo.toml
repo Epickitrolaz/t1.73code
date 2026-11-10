@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/t1_73code",
+    "native/resource-monitor",
+    "native/hyprland-snap-shot",
+    "native/kde-snap-shot",
+]
+resolver = "2"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = true
+

@@ -1,11 +1,16 @@
-use axum::extract::ws::{WebSocket, WebSocketUpgrade};
-use axum::response::Response;
-use std::sync::Arc;
-use crate::state::AppState;
+pub mod config;
+pub mod dispatch;
+pub mod process_manager;
+pub mod session;
+pub mod streams;
 
-pub async fn ws_handler(ws: WebSocketUpgrade, state: Arc<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
-}
+#[cfg(test)]
+mod tests;
 
-async fn handle_socket(_socket: WebSocket, _state: Arc<AppState>) {}
-
+pub use config::{build_server_config, check_pi_available, get_server_providers};
+pub use dispatch::{current_sequence, handle_dispatch_command, next_sequence};
+pub use process_manager::{global_process_manager, ProcessManager};
+pub use session::{handle_socket, process_client_message, ws_handler};
+pub use streams::{
+    handle_subscribe_server_config, handle_subscribe_shell, handle_subscribe_thread,
+};

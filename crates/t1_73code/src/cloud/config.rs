@@ -48,11 +48,33 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>, CloudError> {
     Ok(out)
 }
 
+pub fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() * 4 + 2) / 3);
+    for chunk in input.chunks(3) {
+        let n = ((chunk[0] as u32) << 16)
+            | ((chunk.get(1).copied().unwrap_or(0) as u32) << 8)
+            | chunk.get(2).copied().unwrap_or(0) as u32;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 pub fn base64_decode_string(input: &str) -> Result<String, CloudError> {
     let bytes = base64_decode(input)?;
-    String::from_utf8(bytes).map_err(|e| {
-        CloudError::ConfigError(format!("Failed to decode UTF-8 from base64: {}", e))
-    })
+    String::from_utf8(bytes)
+        .map_err(|e| CloudError::ConfigError(format!("Failed to decode UTF-8 from base64: {}", e)))
 }
 
 pub fn clerk_frontend_api_url_from_publishable_key(key: &str) -> Result<String, CloudError> {
@@ -110,8 +132,7 @@ impl CloudConfig {
             .trim()
             .to_string();
 
-        let frontend_api_url =
-            clerk_frontend_api_url_from_publishable_key(&clerk_publishable_key)?;
+        let frontend_api_url = clerk_frontend_api_url_from_publishable_key(&clerk_publishable_key)?;
         let device_authorization_endpoint =
             format!("{}/oauth/device_authorization", frontend_api_url);
         let token_endpoint = format!("{}/oauth/token", frontend_api_url);
@@ -135,6 +156,7 @@ mod tests {
     fn test_base64_decode() {
         let decoded = base64_decode_string("Y2xlcmsudDMuY29kZXMk").expect("should decode");
         assert_eq!(decoded, "clerk.t3.codes$");
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
     }
 
     #[test]

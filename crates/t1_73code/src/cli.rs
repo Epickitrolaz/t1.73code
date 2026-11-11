@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
-    version = "0.1.73",
+    version = "0.1.74",
     about = "Ultra low-memory T3 Code CLI & server in Rust supporting the Pi agent"
 )]
 pub struct Cli {
@@ -360,7 +360,7 @@ pub async fn run_server(
     } else {
         &host
     };
-    println!("t1.73code v0.1.73");
+    println!("t1.73code v0.1.74");
     println!("Server listening on http://{}:{}", display_host, bound_port);
     println!("  pairingUrl: {}", pairing_url);
     if let Some(ref ts_url) = tailscale_pairing_url {
@@ -1297,7 +1297,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
         let json: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(json["serverVersion"], "0.1.73");
+        assert_eq!(json["serverVersion"], "0.1.74");
 
         // Trigger shutdown and wait for server to exit
         let _ = shutdown_tx.send(());

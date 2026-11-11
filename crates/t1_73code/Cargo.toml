@@ -1,6 +1,6 @@
 [package]
 name = "t1_73code"
-version = "0.1.73"
+version = "0.1.74"
 edition = "2021"
 description = "Ultra low-memory T3 Code CLI & server in Rust supporting the Pi agent"
 authors = ["t1.73code contributors"]

@@ -48,8 +48,17 @@ fn environment_signing_key(home: &std::path::Path) -> Result<(Ed25519KeyPair, St
                 .filter(|line| !line.starts_with("---"))
                 .collect::<String>(),
         )?;
-        let pair = Ed25519KeyPair::from_pkcs8(&private_der)
-            .map_err(|_| CloudError::ConfigError("Invalid environment signing key".into()))?;
+        let pair = if private_der.len() == 48
+            && private_der[..16]
+                == [
+                    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04,
+                    0x22, 0x04, 0x20,
+                ] {
+            Ed25519KeyPair::from_seed_unchecked(&private_der[16..])
+        } else {
+            Ed25519KeyPair::from_pkcs8(&private_der)
+        }
+        .map_err(|_| CloudError::ConfigError("Invalid environment signing key".into()))?;
         let public_pem = value
             .get("publicKey")
             .and_then(Value::as_str)
@@ -76,9 +85,15 @@ fn environment_signing_key(home: &std::path::Path) -> Result<(Ed25519KeyPair, St
         super::config::base64_encode(&public_der)
     );
     let private_der = pkcs8.as_ref();
+    let mut private_pem_bytes = [
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ]
+    .to_vec();
+    private_pem_bytes.extend_from_slice(&private_der[16..]);
     let private_pem = format!(
         "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
-        super::config::base64_encode(private_der)
+        super::config::base64_encode(&private_pem_bytes)
     );
     super::storage::write_secret(
         home,
@@ -111,13 +126,24 @@ pub async fn provision_connect_link(
     let env_id = get_or_create_environment_id(home)?;
     let (key_pair, public_key) = environment_signing_key(home)?;
     let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".into());
-    let descriptor = json!({"environmentId":env_id,"label":hostname,"platform":{"os":std::env::consts::OS,"arch":std::env::consts::ARCH,"machine":hostname},"serverVersion":"0.1.73","orchestrationProtocolVersion":1,"capabilities":{"repositoryIdentity":false}});
+    let platform_os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "linux" => "linux",
+        "windows" => "windows",
+        _ => "unknown",
+    };
+    let platform_arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ => "other",
+    };
+    let descriptor = json!({"environmentId":env_id,"label":hostname,"platform":{"os":platform_os,"arch":platform_arch,"machine":"server"},"serverVersion":"0.1.74","orchestrationProtocolVersion":1,"capabilities":{"repositoryIdentity":false}});
     let local_host = if host == "0.0.0.0" || host == "::" {
-        "localhost"
+        "127.0.0.1"
     } else {
         host
     };
-    let origin = json!({"localHttpHost":local_host,"localHttpPort":port});
+    let origin = json!({"localHttpHost":"127.0.0.1","localHttpPort":port});
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -131,8 +157,15 @@ pub async fn provision_connect_link(
     let response = client.post(format!("{}/v1/client/environment-links", config.relay_url.trim_end_matches('/')))
         .bearer_auth(&token.access_token)
         .json(&json!({"proof":proof,"notificationsEnabled":true,"liveActivitiesEnabled":true,"managedTunnelsEnabled":managed}))
-        .send().await?.error_for_status()?;
-    let result: Value = response.json().await?;
+        .send().await?;
+    let status = response.status();
+    let response_body = response.text().await?;
+    if !status.is_success() {
+        return Err(CloudError::RelayError(format!(
+            "HTTP {status}: {response_body}"
+        )));
+    }
+    let result: Value = serde_json::from_str(&response_body)?;
     if result.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(CloudError::RelayError(
             "Relay did not confirm environment link".into(),

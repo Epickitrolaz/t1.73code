@@ -24,7 +24,7 @@ impl AppState {
         Self {
             home_dir,
             environment_id: env_id,
-            server_version: "0.1.73".to_string(),
+            server_version: "0.1.74".to_string(),
             storage,
             shell_broadcast: shell_tx,
             thread_broadcast: thread_tx,

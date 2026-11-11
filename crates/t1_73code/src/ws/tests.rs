@@ -112,7 +112,7 @@ async fn test_server_get_config() {
                 RpcExit::Success { value } => {
                     let config: ServerConfig = serde_json::from_value(value).unwrap();
                     assert_eq!(config.environment.environment_id, state.environment_id);
-                    assert_eq!(config.environment.server_version, "0.1.73");
+                    assert_eq!(config.environment.server_version, "0.1.74");
                     assert_eq!(config.providers.len(), 1);
                     assert_eq!(config.providers[0].instance_id, "pi");
                 }

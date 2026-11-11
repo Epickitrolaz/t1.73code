@@ -553,6 +553,7 @@ jobs:
           for crate in resource-monitor kde-snap-shot hyprland-snap-shot; do
             cargo test --locked --manifest-path "native/$crate/Cargo.toml"
           done
+          cargo test --manifest-path "crates/t1_73code/Cargo.toml"
 
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis

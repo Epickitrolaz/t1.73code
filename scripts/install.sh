@@ -17,7 +17,7 @@
 # instead of fetching the release again.
 set -eu
 
-repo="pingdotgg/t3code"
+repo="Epickitrolaz/t1.73code"
 base_url="${T3CODE_RELEASE_BASE_URL:-https://github.com/${repo}/releases/download}"
 t3_home="${T3CODE_HOME:-$HOME/.t3}"
 case "$t3_home" in
@@ -55,8 +55,8 @@ step() {
 if "$interactive"; then
   printf '\n%s' "$bold" >&2
   printf '  %s\n' '██████████ ████████ ' >&2
-  printf '  %s\n' '    ███       ▄██▀       T3 Code' >&2
-  printf '  %s%s     %sCLI installer%s\n' '    ███       ████▄ ' "$reset" "$muted" "$reset$bold" >&2
+  printf '  %s\n' '    ███       ▄██▀       t1.73code' >&2
+  printf '  %s%s     %sUltra Low-Memory T3 CLI%s\n' '    ███       ████▄ ' "$reset" "$muted" "$reset$bold" >&2
   printf '  %s\n' '    ███    ▄     ███' >&2
   printf '  %s\n' '    ███    ███████▀ ' >&2
   printf '%s\n' "$reset" >&2
@@ -281,12 +281,14 @@ else
   # Known race, accepted: a file written here after the ownership check above is overwritten.
   ln -sfn "${target_dir}/t3" "${bin_dir}/t3"
 fi
+ln -sfn "${target_dir}/t3" "${bin_dir}/t1.73code"
+ln -sfn "${target_dir}/t3" "${bin_dir}/t1_73code"
 # Pruning keeps what this launcher points at; a background service cannot see bin_dir otherwise.
 launcher="$(CDPATH='' cd -P -- "$bin_dir" && pwd)/t3"
 launchers="${t3_home}/runtime/launchers"
 grep -qxF "$launcher" "$launchers" 2>/dev/null || printf '%s\n' "$launcher" >> "$launchers"
 if "$interactive"; then printf '\r\033[2K' >&2; fi
-printf '  %sInstalled T3 Code %s%s\n\n' "$green" "$version" "$reset" >&2
+printf '  %sInstalled t1.73code %s%s\n\n' "$green" "$version" "$reset" >&2
 # The folder a shell reads its startup file from: $1 when set and safe to paste, else $2 when
 # unset. A set but unsafe folder prints nothing, since the default would never be read.
 read_from() {

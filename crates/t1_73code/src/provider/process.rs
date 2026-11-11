@@ -464,9 +464,14 @@ mod tests {
 
     fn create_mock_pi_script(script_content: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempdir().unwrap();
-        let script_path = dir.path().join("mock_pi.sh");
+        let script_path = dir.path().join(format!("mock_pi_{}.sh", uuid::Uuid::new_v4()));
         let content = format!("#!/bin/sh\n{}", script_content);
-        std::fs::write(&script_path, content).unwrap();
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&script_path).unwrap();
+            file.write_all(content.as_bytes()).unwrap();
+            file.sync_all().unwrap();
+        }
 
         #[cfg(unix)]
         {

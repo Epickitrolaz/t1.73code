@@ -4,7 +4,7 @@ use std::env;
 pub const DEFAULT_RELAY_URL: &str = "https://relay.t3.codes";
 pub const DEFAULT_CLERK_PUBLISHABLE_KEY: &str = "pk_live_Y2xlcmsudDMuY29kZXMk";
 pub const DEFAULT_CLERK_CLI_OAUTH_CLIENT_ID: &str = "hzxSgY2cH10sDU2r";
-pub const DEFAULT_SCOPES: &str = "openid profile email";
+pub const DEFAULT_SCOPES: &str = "openid profile email offline_access";
 
 pub fn base64_decode(input: &str) -> Result<Vec<u8>, CloudError> {
     let mut clean = input.trim().replace('-', "+").replace('_', "/");

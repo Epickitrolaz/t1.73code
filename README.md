@@ -22,21 +22,80 @@ Designed specifically to run comfortably on low-spec systems with **512MB RAM** 
 
 ## Installation & Setup
 
-### Option 1: Automated Setup Script (Recommended)
+### Option 1: Pre-compiled Binary (Recommended for Low-Spec / 512MB RAM Systems)
 
-Run the automated installer script, which verifies your Rust toolchain, compiles the release binaries, installs them to `~/.local/bin`, and runs the diagnostic health check:
+Zero compiler or toolchain required. Downloads and installs the standalone ~7 MB static executable in seconds without consuming RAM or CPU to compile from source.
+
+#### Method A: One-line installer script
+
+On Linux & macOS:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Epickitrolaz/t1.73code/main/scripts/install.sh | sh
+```
+
+On Windows (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/Epickitrolaz/t1.73code/main/scripts/install.ps1 | iex
+```
+
+#### Method B: Direct standalone binary download
+
+Download the pre-compiled executable directly for your architecture, place it in `~/.local/bin`, and make it executable:
+
+- **Linux x86_64**:
+  ```bash
+  mkdir -p ~/.local/bin
+  curl -fsSL -o ~/.local/bin/t1.73code https://github.com/Epickitrolaz/t1.73code/releases/latest/download/t1.73code-linux-x64
+  chmod +x ~/.local/bin/t1.73code
+  ln -sfn ~/.local/bin/t1.73code ~/.local/bin/t3
+  ```
+
+- **Linux ARM64 / aarch64 (Raspberry Pi 4/5, Oracle Ampere, etc.)**:
+  ```bash
+  mkdir -p ~/.local/bin
+  curl -fsSL -o ~/.local/bin/t1.73code https://github.com/Epickitrolaz/t1.73code/releases/latest/download/t1.73code-linux-arm64
+  chmod +x ~/.local/bin/t1.73code
+  ln -sfn ~/.local/bin/t1.73code ~/.local/bin/t3
+  ```
+
+- **macOS Apple Silicon (M1/M2/M3/M4)**:
+  ```bash
+  mkdir -p ~/.local/bin
+  curl -fsSL -o ~/.local/bin/t1.73code https://github.com/Epickitrolaz/t1.73code/releases/latest/download/t1.73code-darwin-arm64
+  chmod +x ~/.local/bin/t1.73code
+  ln -sfn ~/.local/bin/t1.73code ~/.local/bin/t3
+  ```
+
+- **macOS Intel (x86_64)**:
+  ```bash
+  mkdir -p ~/.local/bin
+  curl -fsSL -o ~/.local/bin/t1.73code https://github.com/Epickitrolaz/t1.73code/releases/latest/download/t1.73code-darwin-x64
+  chmod +x ~/.local/bin/t1.73code
+  ln -sfn ~/.local/bin/t1.73code ~/.local/bin/t3
+  ```
+
+### Option 2: Automated Setup Script
+
+Run the automated setup script. By default it installs the pre-compiled binary if available, or compiles with Cargo if `--build-from-source` is passed:
 
 ```bash
 ./scripts/setup.sh
 ```
 
-Or install directly via `curl`:
+Or via curl:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Epickitrolaz/t1.73code/main/scripts/setup.sh | sh
 ```
 
-### Option 2: Build from Source with Cargo
+To force building from source with Cargo via the script:
+```bash
+./scripts/setup.sh --build-from-source
+```
+
+### Option 3: Build from Source with Cargo
+
+For development and custom builds on machines with sufficient RAM (>= 1-2 GB):
 
 ```bash
 # Clone the repository

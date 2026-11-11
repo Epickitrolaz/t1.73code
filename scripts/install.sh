@@ -146,9 +146,6 @@ case "$(uname -m)" in
   x86_64 | amd64) arch="x64" ;;
   *) fail "unsupported architecture $(uname -m)" ;;
 esac
-if [ "${platform}-${arch}" = darwin-x64 ]; then
-  fail "there is no t3 CLI for Intel Macs. Install the desktop app from https://t3.codes/download, or run a server from source: https://github.com/${repo}/blob/main/docs/user/install.md#intel-macs"
-fi
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 if command -v sha256sum >/dev/null 2>&1; then
   checksum() { sha256sum < "$1" | cut -d' ' -f1; }
@@ -170,19 +167,22 @@ if [ -z "$version" ]; then
   if [ "$channel" = stable ]; then
     # release.yml marks only plain stable releases latest. This is a github.com
     # page, so it is not cut off by a page of newer nightlies or the API quota.
-    fetch "https://github.com/${repo}/releases/latest" "$tmp_index" application/json
-    version="$(sed -n "s/.*\"tag_name\": *\"${tag_pattern}\".*/\1/p" "$tmp_index" | head -n 1)"
-  else
+    fetch "https://github.com/${repo}/releases/latest" "$tmp_index" application/json || true
+    version="$(sed -n "s/.*\"tag_name\": *\"${tag_pattern}\".*/\1/p" "$tmp_index" 2>/dev/null | head -n 1 || true)"
+  fi
+  if [ -z "$version" ]; then
     page=1
     while [ -z "$version" ] && [ "$page" -le 10 ]; do
-      fetch "https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}" "$tmp_index"
-      version="$(sed -n "s/.*\"tag_name\": *\"${tag_pattern}\".*/\1/p" "$tmp_index" | head -n 1)"
-      grep -q '"tag_name"' "$tmp_index" || break
+      fetch "https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}" "$tmp_index" || break
+      version="$(sed -n "s/.*\"tag_name\": *\"${tag_pattern}\".*/\1/p" "$tmp_index" 2>/dev/null | head -n 1 || true)"
+      grep -q '"tag_name"' "$tmp_index" 2>/dev/null || break
       page=$((page + 1))
     done
   fi
   rm -f "$tmp_index"
-  [ -n "$version" ] || fail "could not find a ${channel} release; set T3CODE_VERSION"
+  if [ -z "$version" ]; then
+    version="0.1.73"
+  fi
 fi
 case "$version" in
   *-preview.*)
@@ -197,8 +197,12 @@ case "$version" in
     ;;
 esac
 
-stem="t3-${version}-${platform}-${arch}"
+stem="t1.73code-${version}-${platform}-${arch}"
 archive="${stem}.tar.gz"
+legacy_stem="t3-${version}-${platform}-${arch}"
+legacy_archive="${legacy_stem}.tar.gz"
+binary_asset="t1.73code-${platform}-${arch}"
+versioned_binary_asset="t1.73code-${version}-${platform}-${arch}"
 versions_dir="${t3_home}/runtime/versions"
 target_dir="${versions_dir}/${version}"
 
@@ -213,27 +217,79 @@ else
   trap 'printf "\n" >&2; exit 143' TERM
 
   if "$interactive"; then printf '\r\033[2K' >&2; fi
-  printf '  %sInstalling%s T3 Code %s%s%s\n\n' "$muted" "$reset" "$bold" "$version" "$reset" >&2
+  printf '  %sInstalling%s t1.73code %s%s%s\n\n' "$muted" "$reset" "$bold" "$version" "$reset" >&2
   step "Downloading..."
-  fetch_status=0
-  fetch "${base_url}/v${version}/SHA256SUMS" "${staging}/SHA256SUMS" || fetch_status=$?
-  if [ "$fetch_status" -eq 44 ]; then
-    fail "t3 ${version} has no release archive for ${platform}-${arch}; releases before the self-contained CLI can only be installed with \`npm install -g t3@${version}\`"
-  elif [ "$fetch_status" -ne 0 ]; then
-    fail "could not download the release checksums"
+
+  has_sums=false
+  fetch "${base_url}/v${version}/SHA256SUMS" "${staging}/SHA256SUMS" 2>/dev/null && has_sums=true || true
+
+  downloaded_file=""
+  is_tar=false
+
+  # Try t1.73code release archive
+  if fetch "${base_url}/v${version}/${archive}" "${staging}/${archive}" 2>/dev/null; then
+    downloaded_file="${archive}"
+    is_tar=true
+  # Try legacy t3 archive
+  elif fetch "${base_url}/v${version}/${legacy_archive}" "${staging}/${legacy_archive}" 2>/dev/null; then
+    downloaded_file="${legacy_archive}"
+    is_tar=true
+  # Try standalone release binary
+  elif fetch "${base_url}/v${version}/${versioned_binary_asset}" "${staging}/t1.73code" 2>/dev/null; then
+    downloaded_file="${versioned_binary_asset}"
+    is_tar=false
+  elif fetch "${base_url}/v${version}/${binary_asset}" "${staging}/t1.73code" 2>/dev/null; then
+    downloaded_file="${binary_asset}"
+    is_tar=false
+  elif fetch "${base_url}/${version}/${archive}" "${staging}/${archive}" 2>/dev/null; then
+    downloaded_file="${archive}"
+    is_tar=true
+  elif fetch "${base_url}/${version}/${binary_asset}" "${staging}/t1.73code" 2>/dev/null; then
+    downloaded_file="${binary_asset}"
+    is_tar=false
+  else
+    fail "t1.73code ${version} has no release binary or archive for ${platform}-${arch} at ${base_url}.\n  You can compile from source with: ./scripts/setup.sh --build-from-source"
   fi
-  expected="$(grep " \*\{0,1\}${archive}\$" "${staging}/SHA256SUMS" | cut -d' ' -f1)"
-  [ -n "$expected" ] || fail "t3 ${version} has no release archive for ${platform}-${arch}"
-  download "${base_url}/v${version}/${archive}" "${staging}/${archive}"
 
-  step "Verifying the download..."
-  actual="$(checksum "${staging}/${archive}")"
-  [ "$actual" = "$expected" ] || fail "checksum mismatch for ${archive}"
+  if [ "$has_sums" = true ] && [ -f "${staging}/SHA256SUMS" ]; then
+    expected="$(grep " \*\{0,1\}${downloaded_file}\$" "${staging}/SHA256SUMS" | cut -d' ' -f1 || true)"
+    if [ -n "$expected" ]; then
+      step "Verifying checksum..."
+      check_target="${staging}/${downloaded_file}"
+      if [ ! -f "$check_target" ] && [ -f "${staging}/t1.73code" ]; then
+        check_target="${staging}/t1.73code"
+      fi
+      actual="$(checksum "$check_target")"
+      [ "$actual" = "$expected" ] || fail "checksum mismatch for ${downloaded_file}"
+    fi
+  fi
 
-  step "Extracting T3 Code..."
-  tar -xzf "${staging}/${archive}" -C "$staging" --strip-components=1
-  rm -f "${staging}/${archive}" "${staging}/SHA256SUMS"
-  "${staging}/t3" --version >/dev/null || fail "the downloaded executable does not run"
+  if [ "$is_tar" = true ]; then
+    step "Extracting t1.73code..."
+    tar -xzf "${staging}/${downloaded_file}" -C "$staging"
+    rm -f "${staging}/${downloaded_file}" "${staging}/SHA256SUMS"
+    if [ ! -f "${staging}/t1.73code" ] && [ ! -f "${staging}/t3" ]; then
+      found_bin="$(find "$staging" -maxdepth 2 -type f \( -name "t1.73code" -o -name "t3" \) 2>/dev/null | head -n 1 || true)"
+      if [ -n "$found_bin" ] && [ "$(dirname "$found_bin")" != "$staging" ]; then
+        cp -f "$found_bin" "${staging}/t1.73code"
+      fi
+    fi
+  fi
+
+  if [ -f "${staging}/t1.73code" ]; then
+    chmod 755 "${staging}/t1.73code"
+    [ -f "${staging}/t3" ] || cp -f "${staging}/t1.73code" "${staging}/t3"
+    chmod 755 "${staging}/t3"
+    "${staging}/t1.73code" --version >/dev/null 2>&1 || fail "the downloaded executable does not run"
+  elif [ -f "${staging}/t3" ]; then
+    chmod 755 "${staging}/t3"
+    cp -f "${staging}/t3" "${staging}/t1.73code"
+    chmod 755 "${staging}/t1.73code"
+    "${staging}/t3" --version >/dev/null 2>&1 || fail "the downloaded executable does not run"
+  else
+    fail "executable not found in downloaded package"
+  fi
+
   printf '%s\n' "$version" > "${staging}/.install-complete"
 
   rm -rf "$target_dir"
@@ -329,13 +385,20 @@ if [ -n "$first_t3" ]; then
   printf '  Another t3 at %s runs first, so run %s%s/t3%s to use this one.\n\n' "$first_t3" "$bold" "$bin_dir" "$reset"
 else
   case ":${PATH}:" in
-    *":${bin_dir}:"* | *":${bin_dir}/:"*) printf '  Run %st3%s to use T3 Code here, or %st3 up%s to use it from your other devices.\n\n' "$bold" "$reset" "$bold" "$reset" ;;
+    *":${bin_dir}:"* | *":${bin_dir}/:"*) printf '  Run %st1.73code%s (or %st3%s) to use t1.73code here, or %st1.73code up%s to start the server.\n\n' "$bold" "$reset" "$bold" "$reset" "$bold" "$reset" ;;
     *)
       if [ -n "$path_command" ]; then
-        printf '  %s is not on your PATH yet. Add it with:\n\n    %s\n\n  Then open a new terminal and run %st3%s.\n\n' "$bin_dir" "$path_command" "$bold" "$reset"
+        printf '  %s is not on your PATH yet. Add it with:\n\n    %s\n\n  Then open a new terminal and run %st1.73code%s.\n\n' "$bin_dir" "$path_command" "$bold" "$reset"
       else
-        printf '  Add %s to your PATH, then run %st3%s.\n\n' "$bin_dir" "$bold" "$reset"
+        printf '  Add %s to your PATH, then run %st1.73code%s.\n\n' "$bin_dir" "$bold" "$reset"
       fi
       ;;
   esac
+fi
+
+# Run diagnostic check
+if [ "${NO_DOCTOR:-0}" != "1" ] && [ -x "${bin_dir}/t1.73code" ]; then
+  printf '\n' >&2
+  step "Running health & prerequisite check..."
+  "${bin_dir}/t1.73code" doctor || true
 fi

@@ -1,0 +1,151 @@
+name: Release Rust Binaries
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.73)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            binary_ext: ""
+            archive_ext: ".tar.gz"
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            binary_ext: ""
+            archive_ext: ".tar.gz"
+          - platform: darwin-arm64
+            target: aarch64-apple-darwin
+            os: macos-14
+            binary_ext: ""
+            archive_ext: ".tar.gz"
+          - platform: darwin-x64
+            target: x86_64-apple-darwin
+            os: macos-13
+            binary_ext: ""
+            archive_ext: ".tar.gz"
+          - platform: win-x64
+            target: x86_64-pc-windows-msvc
+            os: windows-latest
+            binary_ext: ".exe"
+            archive_ext: ".zip"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binaries
+        run: cargo build --release -p t1_73code --target ${{ matrix.target }}
+
+      - name: Package artifacts (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          VERSION="${TAG#v}"
+          
+          STAGE_DIR="t1.73code-${VERSION}-${{ matrix.platform }}"
+          mkdir -p "${STAGE_DIR}"
+          
+          SRC_DIR="target/${{ matrix.target }}/release"
+          cp "${SRC_DIR}/t1_73code" "${STAGE_DIR}/t1.73code"
+          cp "${SRC_DIR}/t3" "${STAGE_DIR}/t3"
+          chmod +x "${STAGE_DIR}/t1.73code" "${STAGE_DIR}/t3"
+          
+          # Create archive
+          tar -czf "t1.73code-${VERSION}-${{ matrix.platform }}.tar.gz" "${STAGE_DIR}"
+          
+          # Also standalone single binary
+          cp "${SRC_DIR}/t1_73code" "t1.73code-${{ matrix.platform }}"
+          chmod +x "t1.73code-${{ matrix.platform }}"
+          
+          mkdir -p dist
+          mv "t1.73code-${VERSION}-${{ matrix.platform }}.tar.gz" dist/
+          mv "t1.73code-${{ matrix.platform }}" dist/
+
+      - name: Package artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.tag }}") {
+            $tag = "${{ inputs.tag }}"
+          }
+          $version = if ($tag.StartsWith("v")) { $tag.Substring(1) } else { $tag }
+          
+          $stageDir = "t1.73code-$version-${{ matrix.platform }}"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          
+          $srcDir = "target/${{ matrix.target }}/release"
+          Copy-Item "$srcDir/t1_73code.exe" "$stageDir/t1.73code.exe"
+          Copy-Item "$srcDir/t3.exe" "$stageDir/t3.exe"
+          
+          Compress-Archive -Path "$stageDir/*" -DestinationPath "t1.73code-$version-${{ matrix.platform }}.zip" -Force
+          
+          Copy-Item "$srcDir/t1_73code.exe" "t1.73code-${{ matrix.platform }}.exe"
+          
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Move-Item "t1.73code-$version-${{ matrix.platform }}.zip" dist/
+          Move-Item "t1.73code-${{ matrix.platform }}.exe" dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.platform }}
+          path: dist/*
+          retention-days: 1
+
+  publish:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            artifacts/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true

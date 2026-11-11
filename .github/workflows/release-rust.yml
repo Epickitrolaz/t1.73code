@@ -2,6 +2,8 @@ name: Release Rust Binaries
 
 on:
   push:
+    branches:
+      - "**"
     tags:
       - "v*.*.*"
   workflow_dispatch:
@@ -18,7 +20,6 @@ jobs:
   build:
     name: Build (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.continue_on_error || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -38,13 +39,11 @@ jobs:
             os: macos-latest
             binary_ext: ""
             archive_ext: ".tar.gz"
-            continue_on_error: true
           - platform: darwin-x64
             target: x86_64-apple-darwin
             os: macos-latest
             binary_ext: ""
             archive_ext: ".tar.gz"
-            continue_on_error: true
           - platform: win-x64
             target: x86_64-pc-windows-msvc
             os: windows-latest
@@ -75,14 +74,14 @@ jobs:
       - name: Package artifacts (Unix)
         if: runner.os != 'Windows'
         run: |
-          TAG="${{ github.ref_name }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
-            TAG="${{ inputs.tag }}"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            VERSION="${{ inputs.tag }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="${GITHUB_SHA::12}"
           fi
-          if [ "$TAG" = "main" ]; then
-            TAG="v0.1.73"
-          fi
-          VERSION="${TAG#v}"
           
           STAGE_DIR="t1.73code-${VERSION}-${{ matrix.platform }}"
           mkdir -p "${STAGE_DIR}"
@@ -98,23 +97,25 @@ jobs:
           # Also standalone single binary
           cp "${SRC_DIR}/t1_73code" "t1.73code-${{ matrix.platform }}"
           chmod +x "t1.73code-${{ matrix.platform }}"
+          cp "${SRC_DIR}/t3" "t3-${{ matrix.platform }}"
+          chmod +x "t3-${{ matrix.platform }}"
           
           mkdir -p dist
           mv "t1.73code-${VERSION}-${{ matrix.platform }}.tar.gz" dist/
           mv "t1.73code-${{ matrix.platform }}" dist/
+          mv "t3-${{ matrix.platform }}" dist/
 
       - name: Package artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.tag }}") {
-            $tag = "${{ inputs.tag }}"
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.tag }}") {
+            $version = "${{ inputs.tag }}" -replace '^v', ''
+          } else {
+            $version = "${{ github.sha }}".Substring(0, 12)
           }
-          if ($tag -eq "main") {
-            $tag = "v0.1.73"
-          }
-          $version = if ($tag.StartsWith("v")) { $tag.Substring(1) } else { $tag }
           
           $stageDir = "t1.73code-$version-${{ matrix.platform }}"
           New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
@@ -126,23 +127,25 @@ jobs:
           Compress-Archive -Path "$stageDir/*" -DestinationPath "t1.73code-$version-${{ matrix.platform }}.zip" -Force
           
           Copy-Item "$srcDir/t1_73code.exe" "t1.73code-${{ matrix.platform }}.exe"
+          Copy-Item "$srcDir/t3.exe" "t3-${{ matrix.platform }}.exe"
           
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Move-Item "t1.73code-$version-${{ matrix.platform }}.zip" dist/
           Move-Item "t1.73code-${{ matrix.platform }}.exe" dist/
+          Move-Item "t3-${{ matrix.platform }}.exe" dist/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.platform }}
           path: dist/*
-          retention-days: 1
+          retention-days: 30
 
   publish:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
-    if: always() && !cancelled() && contains(needs.build.result, 'success')
+    if: ${{ needs.build.result == 'success' && (github.ref_type == 'tag' || github.event_name == 'workflow_dispatch') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -162,7 +165,7 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || 'v0.1.73' }}
+          tag_name: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || format('rust-{0}', github.sha) }}
           files: |
             artifacts/*
           draft: false

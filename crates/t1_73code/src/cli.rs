@@ -14,7 +14,7 @@ pub struct Cli {
     #[arg(short, long, default_value = "3000", help = "Port to listen on")]
     pub port: u16,
 
-    #[arg(long, default_value = "127.0.0.1", help = "Host to listen on")]
+    #[arg(long, default_value = "0.0.0.0", help = "Host to listen on")]
     pub host: String,
 
     #[arg(long, help = "Share server over Tailscale")]
@@ -33,7 +33,7 @@ pub enum Commands {
     Up {
         #[arg(short, long, default_value = "3000")]
         port: u16,
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = "0.0.0.0")]
         host: String,
         #[arg(long)]
         share: bool,
@@ -46,7 +46,7 @@ pub enum Commands {
     Serve {
         #[arg(short, long, default_value = "3000")]
         port: u16,
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = "0.0.0.0")]
         host: String,
         #[arg(long)]
         share: bool,
@@ -74,6 +74,18 @@ pub enum Commands {
         #[command(subcommand)]
         action: ConnectAction,
     },
+    #[command(about = "Install the server to start at boot (Linux systemd user service)")]
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ServiceAction {
+    Install,
+    Uninstall,
+    Status,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -170,8 +182,7 @@ pub fn generate_startup_pairing(
         host
     };
 
-    let pairing_url =
-        crate::tailscale::generate_pairing_url(url_host, Some(port), &token, false);
+    let pairing_url = crate::tailscale::generate_pairing_url(url_host, Some(port), &token, false);
     Ok((token, pairing_url))
 }
 
@@ -215,7 +226,10 @@ pub async fn run_server(
     std::fs::create_dir_all(home_dir.join("userdata"))?;
 
     let storage = Arc::new(crate::storage::SqliteStorage::new_in_dir(&home_dir)?);
-    let app_state = Arc::new(crate::state::AppState::new(home_dir.clone(), storage.clone()));
+    let app_state = Arc::new(crate::state::AppState::new(
+        home_dir.clone(),
+        storage.clone(),
+    ));
 
     // Generate administrative one-time pairing credential
     let (token, mut pairing_url) = generate_startup_pairing(&storage, &host, port)?;
@@ -232,12 +246,8 @@ pub async fn run_server(
         } else {
             &host
         };
-        pairing_url = crate::tailscale::generate_pairing_url(
-            display_host,
-            Some(bound_port),
-            &token,
-            false,
-        );
+        pairing_url =
+            crate::tailscale::generate_pairing_url(display_host, Some(bound_port), &token, false);
     }
 
     // Share server over Tailscale if requested
@@ -273,7 +283,23 @@ pub async fn run_server(
     let mut tunnel_manager: Option<crate::cloud::TunnelProcessManager> = None;
     if connect {
         match crate::cloud::get_cloud_status(&home_dir, false).await {
-            Ok(cloud_status) => {
+            Ok(mut cloud_status) => {
+                if cloud_status.desired && !cloud_status.linked {
+                    if let Some(token) = crate::cloud::load_token(&home_dir)? {
+                        let mode = crate::cloud::get_desired_link_mode(&home_dir)?;
+                        if let Err(error) = crate::cloud::actions::provision_connect_link(
+                            &home_dir, &token, &mode, &host, bound_port,
+                        )
+                        .await
+                        {
+                            eprintln!("Warning: failed to register this environment with T3 Connect: {error}");
+                        } else if let Ok(updated) =
+                            crate::cloud::get_cloud_status(&home_dir, false).await
+                        {
+                            cloud_status = updated;
+                        }
+                    }
+                }
                 if cloud_status.linked {
                     match crate::cloud::resolve_cloudflared(&home_dir).await {
                         Ok(exe) => {
@@ -310,10 +336,7 @@ pub async fn run_server(
                             }
                         }
                         Err(e) => {
-                            eprintln!(
-                                "Warning: cloudflared relay client is not available: {}",
-                                e
-                            );
+                            eprintln!("Warning: cloudflared relay client is not available: {}", e);
                         }
                     }
                 } else {
@@ -446,9 +469,7 @@ pub async fn check_pi_cli() -> DiagnosticCheck {
     let timeout = std::time::Duration::from_secs(3);
     match tokio::time::timeout(
         timeout,
-        tokio::process::Command::new("pi")
-            .arg("--version")
-            .output(),
+        tokio::process::Command::new("pi").arg("--version").output(),
     )
     .await
     {
@@ -480,9 +501,7 @@ pub async fn check_pi_cli() -> DiagnosticCheck {
             };
             match tokio::time::timeout(
                 timeout,
-                tokio::process::Command::new(which_cmd)
-                    .arg("pi")
-                    .output(),
+                tokio::process::Command::new(which_cmd).arg("pi").output(),
             )
             .await
             {
@@ -677,7 +696,10 @@ pub fn check_memory() -> DiagnosticCheck {
         detail_parts.push(format!("Process RSS: ~{} MB", rss));
     }
     if let (Some(total), Some(avail)) = (total_mb, avail_mb) {
-        detail_parts.push(format!("System Total: {} MB, Available: {} MB", total, avail));
+        detail_parts.push(format!(
+            "System Total: {} MB, Available: {} MB",
+            total, avail
+        ));
     }
 
     let detail_str = if detail_parts.is_empty() {
@@ -746,14 +768,7 @@ pub async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         None => {
-            run_server(
-                cli.port,
-                cli.host,
-                cli.share,
-                cli.connect,
-                cli.home_dir,
-            )
-            .await?;
+            run_server(cli.port, cli.host, cli.share, cli.connect, cli.home_dir).await?;
         }
         Some(Commands::Up {
             port,
@@ -831,9 +846,116 @@ pub async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Some(Commands::Service { action }) => {
+            run_service(
+                action,
+                cli.port,
+                cli.host,
+                cli.share,
+                cli.connect,
+                cli.home_dir,
+            )?;
+        }
     }
 
     Ok(())
+}
+
+fn run_service(
+    action: ServiceAction,
+    port: u16,
+    host: String,
+    share: bool,
+    connect: bool,
+    home_dir: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs;
+        use std::process::Command;
+        let unit_dir =
+            PathBuf::from(std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+                std::env::var("HOME").unwrap_or_else(|_| ".".into()) + "/.config"
+            }))
+            .join("systemd/user");
+        let unit_path = unit_dir.join("t1_73code.service");
+        match action {
+            ServiceAction::Install => {
+                fs::create_dir_all(&unit_dir)?;
+                let executable = std::env::current_exe()?;
+                let mut args = vec![
+                    "up".to_string(),
+                    "--port".into(),
+                    port.to_string(),
+                    "--host".into(),
+                    host,
+                ];
+                if share {
+                    args.push("--share".into());
+                }
+                if connect {
+                    args.push("--connect".into());
+                }
+                if let Some(dir) = home_dir {
+                    args.extend(["--home-dir".into(), dir]);
+                }
+                let quote = |value: &str| format!("\"{}\"", value.replace('"', "\\\""));
+                let exec = std::iter::once(executable.to_string_lossy().to_string())
+                    .chain(args)
+                    .map(|s| quote(&s))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let unit = format!("[Unit]\nDescription=t1.73code server\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart={exec}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n");
+                fs::write(&unit_path, unit)?;
+                let status = Command::new("systemctl")
+                    .args(["--user", "daemon-reload"])
+                    .status()?;
+                if !status.success() {
+                    return Err("systemctl --user daemon-reload failed".into());
+                }
+                let status = Command::new("systemctl")
+                    .args(["--user", "enable", "--now", "t1_73code.service"])
+                    .status()?;
+                if !status.success() {
+                    return Err("systemd service install failed".into());
+                }
+                let user = std::env::var("USER").unwrap_or_default();
+                let _ = Command::new("loginctl")
+                    .args(["enable-linger", &user])
+                    .status();
+                println!("Installed and started {}", unit_path.display());
+            }
+            ServiceAction::Uninstall => {
+                let status = Command::new("systemctl")
+                    .args(["--user", "disable", "--now", "t1_73code.service"])
+                    .status()?;
+                if !status.success() {
+                    eprintln!("Warning: systemctl disable reported a failure");
+                }
+                if unit_path.exists() {
+                    fs::remove_file(&unit_path)?;
+                }
+                let _ = Command::new("systemctl")
+                    .args(["--user", "daemon-reload"])
+                    .status();
+                println!("Removed t1_73code user service");
+            }
+            ServiceAction::Status => {
+                let status = Command::new("systemctl")
+                    .args(["--user", "status", "t1_73code.service"])
+                    .status()?;
+                if !status.success() {
+                    return Err("Service is not active".into());
+                }
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (action, port, host, share, connect, home_dir);
+        Err("t1_73code service install currently supports Linux systemd user services".into())
+    }
 }
 
 #[cfg(test)]
@@ -844,7 +966,7 @@ mod tests {
     fn test_cli_parsing_defaults() {
         let cli = Cli::parse_from(["t1.73code"]);
         assert_eq!(cli.port, 3000);
-        assert_eq!(cli.host, "127.0.0.1");
+        assert_eq!(cli.host, "0.0.0.0");
         assert!(!cli.share);
         assert!(!cli.connect);
         assert!(cli.command.is_none());
@@ -882,14 +1004,8 @@ mod tests {
             _ => panic!("Expected Commands::Up"),
         }
 
-        let cli_serve = Cli::parse_from([
-            "t1.73code",
-            "serve",
-            "--port",
-            "4000",
-            "--host",
-            "127.0.0.1",
-        ]);
+        let cli_serve =
+            Cli::parse_from(["t1.73code", "serve", "--port", "4000", "--host", "0.0.0.0"]);
         match cli_serve.command {
             Some(Commands::Serve {
                 port,
@@ -899,7 +1015,7 @@ mod tests {
                 home_dir,
             }) => {
                 assert_eq!(port, 4000);
-                assert_eq!(host, "127.0.0.1");
+                assert_eq!(host, "0.0.0.0");
                 assert!(!share);
                 assert!(!connect);
                 assert!(home_dir.is_none());
@@ -940,6 +1056,14 @@ mod tests {
             }
             _ => panic!("Expected Commands::Doctor"),
         }
+
+        let cli_service = Cli::parse_from(["t1.73code", "service", "install"]);
+        assert!(matches!(
+            cli_service.command,
+            Some(Commands::Service {
+                action: ServiceAction::Install
+            })
+        ));
     }
 
     #[test]
@@ -953,10 +1077,11 @@ mod tests {
         ]);
         match cli_link.command {
             Some(Commands::Connect {
-                action: ConnectAction::Link {
-                    headless,
-                    publish_only,
-                },
+                action:
+                    ConnectAction::Link {
+                        headless,
+                        publish_only,
+                    },
             }) => {
                 assert!(headless);
                 assert!(publish_only);
@@ -1123,7 +1248,8 @@ mod tests {
         assert_eq!(name.as_deref(), Some("t3-tunnel"));
 
         // 2. From RELAY_ENVIRONMENT_CREDENTIAL_SECRET when runtime config absent
-        crate::cloud::remove_secret(home, crate::cloud::CLOUD_ENDPOINT_RUNTIME_CONFIG_SECRET).unwrap();
+        crate::cloud::remove_secret(home, crate::cloud::CLOUD_ENDPOINT_RUNTIME_CONFIG_SECRET)
+            .unwrap();
         crate::cloud::write_secret(
             home,
             crate::cloud::RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
@@ -1162,7 +1288,10 @@ mod tests {
         // Test HTTP call to discovery endpoint
         let client = reqwest::Client::new();
         let resp = client
-            .get(format!("http://127.0.0.1:{}/.well-known/t3/environment", port))
+            .get(format!(
+                "http://127.0.0.1:{}/.well-known/t3/environment",
+                port
+            ))
             .send()
             .await
             .unwrap();

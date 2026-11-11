@@ -6,3 +6,6 @@ mod tests;
 
 pub use engine::{SqliteStorage, Storage};
 pub use models::*;
+
+pub type StorageEngine = SqliteStorage;
+

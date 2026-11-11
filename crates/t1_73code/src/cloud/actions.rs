@@ -6,9 +6,9 @@ use super::config::CloudConfig;
 use super::error::CloudError;
 use super::status::{format_cloud_status, get_cloud_status, CloudStatus};
 use super::storage::{
-    clear_token, get_or_create_environment_id, load_token, remove_secret, resolve_t3_home_dir,
-    save_token, set_desired_cloud_link, write_secret, CLOUD_LINKED_USER_ID_SECRET,
-    CLOUD_LINK_REVOKED_SECRET, PUBLISH_AGENT_ACTIVITY_SECRET,
+    clear_token, drop_revoked_or_stale_link, get_or_create_environment_id, load_token,
+    remove_secret, resolve_t3_home_dir, save_token, set_desired_cloud_link, write_secret,
+    CLOUD_LINKED_USER_ID_SECRET, CLOUD_LINK_REVOKED_SECRET, PUBLISH_AGENT_ACTIVITY_SECRET,
 };
 use super::tunnel::resolve_cloudflared;
 
@@ -95,8 +95,10 @@ pub async fn connect_link(
         write_secret(&home, PUBLISH_AGENT_ACTIVITY_SECRET, b"true")?;
     }
 
-    // Drop revoked marker if any
-    let _ = remove_secret(&home, CLOUD_LINK_REVOKED_SECRET);
+    // Drop revoked or stale credentials when re-establishing link
+    if drop_revoked_or_stale_link(&home)? {
+        println!("Replacing the link T3 Connect revoked.");
+    }
 
     let identity_str = token
         .identity

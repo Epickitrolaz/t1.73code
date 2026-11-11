@@ -7,10 +7,14 @@ use std::path::{Path, PathBuf};
 pub const CLOUD_CLI_OAUTH_TOKEN_SECRET: &str = "cloud-cli-oauth-token";
 pub const CLOUD_CLI_DESIRED_LINK_SECRET: &str = "cloud-cli-desired-link";
 pub const CLOUD_LINKED_USER_ID_SECRET: &str = "cloud-linked-user-id";
-pub const RELAY_URL_SECRET: &str = "relay-url";
-pub const PUBLISH_AGENT_ACTIVITY_SECRET: &str = "publish-agent-activity";
+pub const RELAY_URL_SECRET: &str = "cloud-relay-url";
+pub const PUBLISH_AGENT_ACTIVITY_SECRET: &str = "cloud-publish-agent-activity";
 pub const CLOUD_LINK_REVOKED_SECRET: &str = "cloud-link-revoked";
 pub const ENVIRONMENT_ID_SECRET: &str = "environment-id";
+pub const RELAY_ENVIRONMENT_CREDENTIAL_SECRET: &str = "cloud-relay-environment-credential";
+pub const CLOUD_MINT_PUBLIC_KEY_SECRET: &str = "cloud-mint-ed25519-public-key";
+pub const CLOUD_ENDPOINT_RUNTIME_CONFIG_SECRET: &str = "cloud-endpoint-runtime-config";
+pub const CLOUD_ENDPOINT_CONFIRMED_ORIGIN_SECRET: &str = "cloud-endpoint-confirmed-origin";
 
 pub fn resolve_t3_home_dir(custom_home_dir: Option<&str>) -> PathBuf {
     if let Some(custom) = custom_home_dir {
@@ -137,17 +141,56 @@ pub fn get_desired_link_mode(home_dir: &Path) -> Result<String, CloudError> {
     }
 }
 
+pub fn resolve_environment_id_path(home_dir: &Path) -> PathBuf {
+    home_dir.join("userdata").join("environment-id")
+}
+
 pub fn get_or_create_environment_id(home_dir: &Path) -> Result<String, CloudError> {
+    // 1. Check <home_dir>/userdata/environment-id as plain text
+    let plain_path = resolve_environment_id_path(home_dir);
+    if plain_path.exists() {
+        if let Ok(content) = fs::read_to_string(&plain_path) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+    }
+
+    // 2. Fall back to userdata/secrets/environment-id.bin
     if let Some(bytes) = read_secret(home_dir, ENVIRONMENT_ID_SECRET)? {
         let id = String::from_utf8_lossy(&bytes).trim().to_string();
         if !id.is_empty() {
+            if let Some(parent) = plain_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&plain_path, format!("{}\n", id));
             return Ok(id);
         }
     }
 
+    // 3. Generate new UUID, write to plain text file and secret file
     let new_id = uuid::Uuid::new_v4().to_string();
-    write_secret(home_dir, ENVIRONMENT_ID_SECRET, new_id.as_bytes())?;
+    if let Some(parent) = plain_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&plain_path, format!("{}\n", new_id))?;
+    let _ = write_secret(home_dir, ENVIRONMENT_ID_SECRET, new_id.as_bytes());
+
     Ok(new_id)
+}
+
+pub fn drop_revoked_or_stale_link(home_dir: &Path) -> Result<bool, CloudError> {
+    let was_revoked = read_secret(home_dir, CLOUD_LINK_REVOKED_SECRET)?.is_some();
+
+    let _ = remove_secret(home_dir, CLOUD_LINKED_USER_ID_SECRET);
+    let _ = remove_secret(home_dir, RELAY_ENVIRONMENT_CREDENTIAL_SECRET);
+    let _ = remove_secret(home_dir, CLOUD_MINT_PUBLIC_KEY_SECRET);
+    let _ = remove_secret(home_dir, CLOUD_ENDPOINT_RUNTIME_CONFIG_SECRET);
+    let _ = remove_secret(home_dir, CLOUD_ENDPOINT_CONFIRMED_ORIGIN_SECRET);
+    let _ = remove_secret(home_dir, CLOUD_LINK_REVOKED_SECRET);
+
+    Ok(was_revoked)
 }
 
 // SQLite implementations
@@ -303,13 +346,54 @@ mod tests {
     }
 
     #[test]
+    fn test_canonical_secret_keys() {
+        assert_eq!(RELAY_URL_SECRET, "cloud-relay-url");
+        assert_eq!(PUBLISH_AGENT_ACTIVITY_SECRET, "cloud-publish-agent-activity");
+    }
+
+    #[test]
     fn test_environment_id() {
         let dir = tempdir().unwrap();
         let home = dir.path();
 
+        // 1. Initial generation
         let id1 = get_or_create_environment_id(home).unwrap();
         assert!(!id1.is_empty());
+
+        // File should exist in <home>/userdata/environment-id
+        let plain_path = resolve_environment_id_path(home);
+        assert!(plain_path.exists());
+        let text = fs::read_to_string(&plain_path).unwrap();
+        assert_eq!(text.trim(), id1);
+
+        // 2. Consistent second read
         let id2 = get_or_create_environment_id(home).unwrap();
         assert_eq!(id1, id2);
+
+        // 3. If plain file has specific content, it takes precedence
+        fs::write(&plain_path, "custom-env-id-123\n").unwrap();
+        let id3 = get_or_create_environment_id(home).unwrap();
+        assert_eq!(id3, "custom-env-id-123");
+    }
+
+    #[test]
+    fn test_drop_revoked_or_stale_link() {
+        let dir = tempdir().unwrap();
+        let home = dir.path();
+
+        write_secret(home, CLOUD_LINK_REVOKED_SECRET, b"revoked").unwrap();
+        write_secret(home, CLOUD_LINKED_USER_ID_SECRET, b"user_123").unwrap();
+        write_secret(home, RELAY_ENVIRONMENT_CREDENTIAL_SECRET, b"cred").unwrap();
+
+        let was_revoked = drop_revoked_or_stale_link(home).unwrap();
+        assert!(was_revoked);
+
+        assert_eq!(read_secret(home, CLOUD_LINK_REVOKED_SECRET).unwrap(), None);
+        assert_eq!(read_secret(home, CLOUD_LINKED_USER_ID_SECRET).unwrap(), None);
+        assert_eq!(read_secret(home, RELAY_ENVIRONMENT_CREDENTIAL_SECRET).unwrap(), None);
+
+        // Second call when not revoked
+        let was_revoked2 = drop_revoked_or_stale_link(home).unwrap();
+        assert!(!was_revoked2);
     }
 }

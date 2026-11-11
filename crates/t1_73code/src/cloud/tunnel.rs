@@ -4,7 +4,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::process::{Child, Command};
 
@@ -83,9 +83,55 @@ pub async fn probe_cloudflared_version(path: &Path) -> Result<String, CloudError
     Ok("unknown".to_string())
 }
 
+pub fn find_cloudflared_in_dir(dir: &Path) -> Option<PathBuf> {
+    if !dir.exists() || !dir.is_dir() {
+        return None;
+    }
+
+    let target_name = cloudflared_filename();
+
+    // Check direct child first: <dir>/cloudflared
+    let direct = dir.join(target_name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    // Search subdirectories recursively (e.g. <dir>/<version>/<platform>-<arch>/cloudflared)
+    let mut dirs_to_visit = vec![(dir.to_path_buf(), 0usize)];
+    let mut candidates = Vec::new();
+
+    while let Some((current_dir, depth)) = dirs_to_visit.pop() {
+        if depth > 4 {
+            continue;
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&current_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(file_name) = path.file_name() {
+                        if file_name == target_name {
+                            candidates.push(path);
+                        }
+                    }
+                } else if path.is_dir() {
+                    dirs_to_visit.push((path, depth + 1));
+                }
+            }
+        }
+    }
+
+    // Sort descending so newer versions/paths are tried first
+    candidates.sort_by(|a, b| b.cmp(a));
+    candidates.into_iter().next()
+}
+
 pub async fn resolve_cloudflared(home_dir: &Path) -> Result<CloudflaredExecutable, CloudError> {
-    // 1. CLOUDFLARED_PATH override
-    if let Ok(override_path) = env::var("CLOUDFLARED_PATH") {
+    // 1. T3CODE_CLOUDFLARED_PATH then CLOUDFLARED_PATH override
+    let override_var = env::var("T3CODE_CLOUDFLARED_PATH")
+        .or_else(|_| env::var("CLOUDFLARED_PATH"));
+
+    if let Ok(override_path) = override_var {
         let p = PathBuf::from(override_path.trim());
         if p.exists() {
             let version = probe_cloudflared_version(&p).await.unwrap_or_else(|_| "unknown".to_string());
@@ -97,15 +143,12 @@ pub async fn resolve_cloudflared(home_dir: &Path) -> Result<CloudflaredExecutabl
         }
     }
 
-    // 2. Managed path: <home_dir>/tools/cloudflared/cloudflared
-    let managed = home_dir
-        .join("tools")
-        .join("cloudflared")
-        .join(cloudflared_filename());
-    if managed.exists() {
-        let version = probe_cloudflared_version(&managed).await.unwrap_or_else(|_| "unknown".to_string());
+    // 2. Managed path: <home_dir>/tools/cloudflared and subdirectories
+    let managed_root = home_dir.join("tools").join("cloudflared");
+    if let Some(managed_bin) = find_cloudflared_in_dir(&managed_root) {
+        let version = probe_cloudflared_version(&managed_bin).await.unwrap_or_else(|_| "unknown".to_string());
         return Ok(CloudflaredExecutable {
-            path: managed,
+            path: managed_bin,
             version,
             source: CloudflaredSource::Managed,
         });
@@ -116,7 +159,7 @@ pub async fn resolve_cloudflared(home_dir: &Path) -> Result<CloudflaredExecutabl
         let delimiter = if cfg!(target_os = "windows") { ';' } else { ':' };
         for dir in path_var.split(delimiter) {
             let candidate = Path::new(dir.trim()).join(cloudflared_filename());
-            if candidate.exists() {
+            if candidate.is_file() {
                 let version = probe_cloudflared_version(&candidate).await.unwrap_or_else(|_| "unknown".to_string());
                 return Ok(CloudflaredExecutable {
                     path: candidate,
@@ -213,7 +256,7 @@ pub fn spawn_tunnel_process(
 }
 
 pub struct TunnelProcessManager {
-    child: Option<Child>,
+    child: Mutex<Option<Child>>,
     pid: Option<u32>,
     running: Arc<AtomicBool>,
 }
@@ -223,7 +266,7 @@ impl TunnelProcessManager {
         let child = spawn_tunnel_process(executable, config)?;
         let pid = child.id();
         Ok(TunnelProcessManager {
-            child: Some(child),
+            child: Mutex::new(Some(child)),
             pid,
             running: Arc::new(AtomicBool::new(true)),
         })
@@ -234,13 +277,40 @@ impl TunnelProcessManager {
     }
 
     pub fn is_alive(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        if !self.running.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(ref mut child) = *guard {
+                match child.try_wait() {
+                    Ok(None) => true,
+                    Ok(Some(_status)) => {
+                        self.running.store(false, Ordering::SeqCst);
+                        false
+                    }
+                    Err(_) => {
+                        self.running.store(false, Ordering::SeqCst);
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+        } else {
+            self.running.load(Ordering::SeqCst)
+        }
     }
 
     pub async fn stop(&mut self) -> Result<(), CloudError> {
-        if let Some(mut child) = self.child.take() {
+        self.running.store(false, Ordering::SeqCst);
+        let maybe_child = if let Ok(mut guard) = self.child.lock() {
+            guard.take()
+        } else {
+            None
+        };
+        if let Some(mut child) = maybe_child {
             let _ = child.kill().await;
-            self.running.store(false, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -248,8 +318,10 @@ impl TunnelProcessManager {
 
 impl Drop for TunnelProcessManager {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.start_kill();
+            }
         }
     }
 }
@@ -306,5 +378,22 @@ mod tests {
         assert!(yaml.contains("hostname: app.t3.codes"));
         assert!(yaml.contains("service: http://127.0.0.1:3773"));
         assert!(yaml.contains("service: http_status:404"));
+    }
+
+    #[test]
+    fn test_find_cloudflared_in_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        assert_eq!(find_cloudflared_in_dir(root), None);
+
+        // Nested directory: <root>/2026.10.4/linux-amd64/cloudflared
+        let nested = root.join("2026.10.4").join("linux-amd64");
+        std::fs::create_dir_all(&nested).unwrap();
+        let binary_path = nested.join(cloudflared_filename());
+        std::fs::write(&binary_path, b"dummy binary").unwrap();
+
+        let found = find_cloudflared_in_dir(root);
+        assert_eq!(found, Some(binary_path));
     }
 }
